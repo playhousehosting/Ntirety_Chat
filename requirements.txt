@@ -1,0 +1,5 @@
+streamlit==1.29.0
+requests==2.31.0
+sseclient-py==1.7.2
+pyperclip==1.8.2
+Werkzeug==3.0.1
