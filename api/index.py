@@ -138,33 +138,53 @@ async def root():
                 try {
                     const eventSource = new EventSource(`/api/chat/stream?message=${encodeURIComponent(messageText)}&user_id=${userId}`);
                     let fullResponse = '';
+                    let responseElement = null;
 
                     eventSource.onmessage = (event) => {
                         try {
                             const data = JSON.parse(event.data);
                             if (data.answer) {
                                 fullResponse += data.answer;
-                                // Update the last message if it's from the assistant
-                                const messages = chatContainer.getElementsByClassName('assistant-message');
-                                if (messages.length > 0) {
-                                    const lastMessage = messages[messages.length - 1];
-                                    lastMessage.textContent = fullResponse;
+                                
+                                if (!responseElement) {
+                                    responseElement = document.createElement('div');
+                                    responseElement.className = 'mb-4 text-left';
+                                    responseElement.innerHTML = `
+                                        <div class="bg-gray-100 inline-block px-6 py-3 rounded-lg max-w-[70%]">
+                                            <p class="text-gray-800 assistant-message">${fullResponse}</p>
+                                        </div>
+                                    `;
+                                    chatContainer.appendChild(responseElement);
                                 } else {
-                                    appendMessage(fullResponse, false);
+                                    const messageP = responseElement.querySelector('.assistant-message');
+                                    if (messageP) {
+                                        messageP.textContent = fullResponse;
+                                    }
                                 }
+                                
+                                chatContainer.scrollTop = chatContainer.scrollHeight;
                             }
                         } catch (error) {
-                            console.error('Error parsing SSE data:', error);
+                            console.error('Error parsing message:', error);
                         }
                     };
 
-                    eventSource.onerror = (error) => {
-                        console.error('EventSource error:', error);
-                        eventSource.close();
-                        if (!fullResponse) {
-                            appendMessage('Sorry, there was an error processing your message.', false);
+                    eventSource.addEventListener('error', (event) => {
+                        console.error('EventSource error:', event);
+                        try {
+                            const data = JSON.parse(event.data);
+                            appendMessage(`Error: ${data.error}`, false);
+                        } catch (e) {
+                            appendMessage('Connection error occurred', false);
                         }
-                    };
+                        eventSource.close();
+                    });
+
+                    // Close the connection when the response is complete
+                    eventSource.addEventListener('done', (event) => {
+                        eventSource.close();
+                    });
+
                 } catch (error) {
                     console.error('Error:', error);
                     appendMessage('Sorry, there was an error processing your message.', false);
@@ -274,11 +294,12 @@ async def chat_stream(message: str, user_id: str):
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        yield {
-                            "event": "error",
-                            "data": json.dumps({"error": f"API Error: {error_text}"})
-                        }
+                        yield "event: error\n"
+                        yield f"data: {json.dumps({'error': f'API Error: {error_text}'})}\n\n"
                         return
+
+                    # Send a keep-alive comment
+                    yield ": keep-alive\n\n"
 
                     async for line in response.content:
                         if line:
@@ -286,25 +307,28 @@ async def chat_stream(message: str, user_id: str):
                                 line_text = line.decode('utf-8').strip()
                                 if line_text:
                                     data = json.loads(line_text)
-                                    yield {
-                                        "event": "message",
-                                        "data": json.dumps(data)
-                                    }
+                                    # Send the chat message event
+                                    yield "event: message\n"
+                                    yield f"data: {json.dumps(data)}\n\n"
                             except json.JSONDecodeError:
                                 continue
                             except Exception as e:
-                                yield {
-                                    "event": "error",
-                                    "data": json.dumps({"error": f"Processing error: {str(e)}"})
-                                }
+                                yield "event: error\n"
+                                yield f"data: {json.dumps({'error': f'Processing error: {str(e)}'})}\n\n"
 
         except Exception as e:
-            yield {
-                "event": "error",
-                "data": json.dumps({"error": f"Connection error: {str(e)}"})
-            }
+            yield "event: error\n"
+            yield f"data: {json.dumps({'error': f'Connection error: {str(e)}'})}\n\n"
 
-    return EventSourceResponse(event_generator())
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.post("/api/chat")
 async def chat(request: Request):
