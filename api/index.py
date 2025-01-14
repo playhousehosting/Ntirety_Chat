@@ -22,7 +22,7 @@ app.add_middleware(
 )
 
 # Dify API configuration
-BASE_URL = os.environ.get('DIFY_BASE_URL', "http://bots.chatwithgpt.app/v1")
+BASE_URL = os.environ.get('DIFY_BASE_URL', "https://bots.chatwithgpt.app/v1")
 API_KEY = os.environ.get('DIFY_API_KEY', "app-3wTiB7TV6d1UY3qHf0GL2W5J")
 
 @app.get("/", response_class=HTMLResponse)
