@@ -274,7 +274,7 @@ async def root():
     """
 
 @app.get("/api/chat/stream")
-async def chat_stream(message: str, user_id: str, conversation_id: Optional[str] = None):
+async def chat_stream(message: str, user_id: str, conversation_id: Optional[str] = None, files: Optional[str] = None):
     async def event_generator():
         try:
             url = f"{BASE_URL}/chat-messages"
@@ -283,12 +283,16 @@ async def chat_stream(message: str, user_id: str, conversation_id: Optional[str]
                 'Content-Type': 'application/json'
             }
             
+            # Parse files JSON if provided
+            file_list = json.loads(files) if files else []
+            
             payload = {
                 "inputs": {},
                 "query": message,
                 "user": user_id,
                 "response_mode": "streaming",
-                "conversation_id": conversation_id or ""
+                "conversation_id": conversation_id or "",
+                "files": file_list
             }
 
             async with aiohttp.ClientSession() as session:
@@ -336,6 +340,7 @@ async def chat(request: Request):
         message = data.get('message')
         user_id = data.get('user_id')
         conversation_id = data.get('conversation_id')
+        files = data.get('files', [])
 
         if not message or not user_id:
             return JSONResponse(
@@ -354,7 +359,8 @@ async def chat(request: Request):
             "query": message,
             "user": user_id,
             "response_mode": "blocking",
-            "conversation_id": conversation_id or ""
+            "conversation_id": conversation_id or "",
+            "files": files
         }
 
         async with aiohttp.ClientSession() as session:
@@ -365,9 +371,7 @@ async def chat(request: Request):
                         status_code=response.status,
                         content={"error": f"API Error: {error_text}"}
                     )
-
-                response_data = await response.json()
-                return response_data
+                return await response.json()
 
     except Exception as e:
         return JSONResponse(
@@ -581,16 +585,30 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
         )
 
     try:
-        allowed_types = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
+        allowed_types = {
+            'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+            'application/pdf', 'text/plain', 'text/csv',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
         content_type = file.content_type or 'application/octet-stream'
         
         if content_type not in allowed_types:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"File type {content_type} not supported. Allowed types: PNG, JPEG, GIF, WEBP"}
+                content={
+                    "error": f"File type {content_type} not supported",
+                    "allowed_types": list(allowed_types)
+                }
             )
 
+        # Check file size (10MB limit)
         contents = await file.read()
+        if len(contents) > 10 * 1024 * 1024:  # 10MB in bytes
+            return JSONResponse(
+                status_code=400,
+                content={"error": "File size exceeds 10MB limit"}
+            )
         
         url = f"{BASE_URL}/files/upload"
         headers = {
@@ -603,22 +621,33 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
             form.add_field('user', user_id)
 
             async with session.post(url, headers=headers, data=form) as response:
+                response_data = await response.json()
+                
                 if response.status != 200:
-                    error_text = await response.text()
                     return JSONResponse(
                         status_code=response.status,
-                        content={"error": f"Failed to upload file: {error_text}"}
+                        content={
+                            "error": "Failed to upload file",
+                            "details": response_data.get("error", "Unknown error")
+                        }
                     )
 
-                try:
-                    response_data = await response.json()
-                    return {"response": "File uploaded successfully", "data": response_data}
-                except json.JSONDecodeError:
-                    if response.status == 200:
-                        return {"response": "File uploaded successfully"}
-                    else:
-                        return {"error": "Failed to parse response from chat service"}
+                return {
+                    "response": "File uploaded successfully",
+                    "data": {
+                        "id": response_data.get("id"),
+                        "name": file.filename,
+                        "size": len(contents),
+                        "type": content_type,
+                        "url": response_data.get("url")
+                    }
+                }
 
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to parse response from chat service"}
+        )
     except Exception as e:
         return JSONResponse(
             status_code=500,
