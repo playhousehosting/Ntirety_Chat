@@ -25,6 +25,12 @@ app.add_middleware(
 BASE_URL = os.environ.get('DIFY_BASE_URL', "https://bots.chatwithgpt.app/v1")
 API_KEY = os.environ.get('DIFY_API_KEY', "app-3wTiB7TV6d1UY3qHf0GL2W5J")
 
+# Audio file configuration
+ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a'}
+
+def allowed_audio_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_AUDIO_EXTENSIONS
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
@@ -648,6 +654,176 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
             status_code=500,
             content={"error": "Failed to parse response from chat service"}
         )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/audio-to-text")
+async def audio_to_text(file: UploadFile = File(...), user_id: str = None):
+    if not user_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "user_id is required"}
+        )
+
+    try:
+        if not allowed_audio_file(file.filename):
+            return JSONResponse(
+                status_code=415,
+                content={"error": "Unsupported audio format"}
+            )
+
+        contents = await file.read()
+        if len(contents) > 10 * 1024 * 1024:  # 10MB
+            return JSONResponse(
+                status_code=413,
+                content={"error": "Audio file is too large (max 10MB)"}
+            )
+
+        url = f"{BASE_URL}/audio-to-text"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}'
+        }
+
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field('file', contents, filename=file.filename)
+            form.add_field('user', user_id)
+
+            async with session.post(url, headers=headers, data=form) as response:
+                response_data = await response.json()
+                if response.status != 200:
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": "Failed to process audio", "details": response_data}
+                    )
+                return response_data
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/text-to-audio")
+async def text_to_audio(request: Request):
+    try:
+        data = await request.json()
+        text = data.get('text')
+        message_id = data.get('message_id')
+        user_id = data.get('user_id')
+
+        if not any([text, message_id]) or not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Either text or message_id, and user_id are required"}
+            )
+
+        url = f"{BASE_URL}/text-to-audio"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+
+        payload = {
+            "user": user_id
+        }
+        if text:
+            payload["text"] = text
+        if message_id:
+            payload["message_id"] = message_id
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"Failed to convert text to audio: {error_text}"}
+                    )
+
+                # Stream the audio response
+                return StreamingResponse(
+                    response.content.iter_any(),
+                    media_type=response.headers.get('Content-Type', 'audio/mpeg'),
+                    headers={
+                        'Content-Disposition': response.headers.get('Content-Disposition', 'attachment; filename=audio.mp3')
+                    }
+                )
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/create-conversation")
+async def create_conversation(request: Request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+
+        if not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "user_id is required"}
+            )
+
+        url = f"{BASE_URL}/conversations"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        payload = {"user": user_id}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"Failed to create conversation: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/process-file")
+async def process_file_embedding(request: Request):
+    try:
+        data = await request.json()
+        file_id = data.get('file_id')
+        user_id = data.get('user_id')
+
+        if not file_id or not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "file_id and user_id are required"}
+            )
+
+        url = f"{BASE_URL}/files/{file_id}/process"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        payload = {"user": user_id}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"Failed to process file: {error_text}"}
+                    )
+                return await response.json()
+
     except Exception as e:
         return JSONResponse(
             status_code=500,
