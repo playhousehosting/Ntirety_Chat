@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import requests
 import json
 import os
@@ -89,7 +88,13 @@ async def root():
                     });
 
                     const data = await response.json();
-                    appendMessage(data.response, false);
+                    if (data.error) {
+                        appendMessage('Error: ' + data.error, false);
+                    } else if (data.response) {
+                        appendMessage(data.response, false);
+                    } else {
+                        appendMessage('Received an invalid response from the server.', false);
+                    }
                 } catch (error) {
                     console.error('Error:', error);
                     appendMessage('Sorry, there was an error processing your message.', false);
@@ -114,7 +119,10 @@ async def chat(request: Request):
         user_id = data.get('user_id')
 
         if not message or not user_id:
-            raise HTTPException(status_code=400, detail="Message and user_id are required")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Message and user_id are required"}
+            )
 
         # Call Dify API
         url = f"{BASE_URL}/chat-messages"
@@ -127,15 +135,19 @@ async def chat(request: Request):
             "inputs": {},
             "query": message,
             "user": user_id,
-            "response_mode": "blocking"  # Changed to blocking for simpler implementation
+            "response_mode": "blocking"
         }
 
         response = requests.post(url, headers=headers, json=payload)
         response_data = response.json()
 
-        return {
-            "response": response_data.get('answer', 'Sorry, I could not process your request.')
-        }
+        if 'answer' in response_data:
+            return {"response": response_data['answer']}
+        else:
+            return {"error": "No answer received from the chat service"}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
