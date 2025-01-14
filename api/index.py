@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import json
 import os
 import uuid
@@ -11,6 +12,9 @@ import aiohttp
 from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI()
+
+# Mount the public directory for static files
+app.mount("/public", StaticFiles(directory="public"), name="public")
 
 # Add CORS middleware
 app.add_middleware(
@@ -32,6 +36,7 @@ async def root():
     <html>
     <head>
         <title>Ntirety Chatbot Beta</title>
+        <link rel="icon" type="image/x-icon" href="/public/favicon.ico">
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             .chat-container { height: calc(100vh - 400px); }
