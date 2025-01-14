@@ -243,7 +243,14 @@ async def root():
 @app.post("/api/chat")
 async def chat(request: Request):
     try:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid JSON data"}
+            )
+
         message = data.get('message')
         user_id = data.get('user_id')
 
@@ -267,8 +274,20 @@ async def chat(request: Request):
             "response_mode": "blocking"
         }
 
-        response = requests.post(url, headers=headers, json=payload)
-        response_data = response.json()
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()  # Raise an exception for bad status codes
+            response_data = response.json()
+        except requests.RequestException as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Failed to communicate with chat service: {str(e)}"}
+            )
+        except json.JSONDecodeError:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Received invalid response from chat service"}
+            )
 
         if 'answer' in response_data:
             return {"response": response_data['answer']}
@@ -282,18 +301,32 @@ async def chat(request: Request):
         )
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile, user_id: str):
+async def upload_file(file: UploadFile = File(...), user_id: str = None):
+    if not user_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "user_id is required"}
+        )
+
     try:
         # Validate file type
         allowed_types = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
-        if file.content_type not in allowed_types:
+        content_type = file.content_type or 'application/octet-stream'
+        
+        if content_type not in allowed_types:
             return JSONResponse(
                 status_code=400,
-                content={"error": "File type not supported"}
+                content={"error": f"File type {content_type} not supported. Allowed types: PNG, JPEG, GIF, WEBP"}
             )
 
         # Read file content
-        contents = await file.read()
+        try:
+            contents = await file.read()
+        except Exception as e:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Failed to read file: {str(e)}"}
+            )
         
         # Call Dify API for file upload
         url = f"{BASE_URL}/files/upload"
@@ -302,18 +335,29 @@ async def upload_file(file: UploadFile, user_id: str):
         }
         
         files = {
-            'file': (file.filename, contents, file.content_type)
+            'file': (file.filename, contents, content_type)
         }
         data = {
             'user': user_id
         }
 
-        response = requests.post(url, headers=headers, files=files, data=data)
-        
-        if response.status_code == 200:
-            return {"response": "File uploaded successfully"}
-        else:
-            return {"error": "Failed to upload file to chat service"}
+        try:
+            response = requests.post(url, headers=headers, files=files, data=data)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Failed to upload file to chat service: {str(e)}"}
+            )
+
+        try:
+            response_data = response.json()
+            return {"response": "File uploaded successfully", "data": response_data}
+        except json.JSONDecodeError:
+            if response.status_code == 200:
+                return {"response": "File uploaded successfully"}
+            else:
+                return {"error": "Failed to parse response from chat service"}
 
     except Exception as e:
         return JSONResponse(
