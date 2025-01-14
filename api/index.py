@@ -273,7 +273,7 @@ async def root():
     """
 
 @app.get("/api/chat/stream")
-async def chat_stream(message: str, user_id: str):
+async def chat_stream(message: str, user_id: str, conversation_id: Optional[str] = None):
     async def event_generator():
         try:
             url = f"{BASE_URL}/chat-messages"
@@ -287,7 +287,7 @@ async def chat_stream(message: str, user_id: str):
                 "query": message,
                 "user": user_id,
                 "response_mode": "streaming",
-                "conversation_id": ""
+                "conversation_id": conversation_id or ""
             }
 
             async with aiohttp.ClientSession() as session:
@@ -298,7 +298,6 @@ async def chat_stream(message: str, user_id: str):
                         yield f"data: {json.dumps({'error': f'API Error: {error_text}'})}\n\n"
                         return
 
-                    # Send a keep-alive comment
                     yield ": keep-alive\n\n"
 
                     async for line in response.content:
@@ -307,7 +306,6 @@ async def chat_stream(message: str, user_id: str):
                                 line_text = line.decode('utf-8').strip()
                                 if line_text:
                                     data = json.loads(line_text)
-                                    # Send the chat message event
                                     yield "event: message\n"
                                     yield f"data: {json.dumps(data)}\n\n"
                             except json.JSONDecodeError:
@@ -336,6 +334,7 @@ async def chat(request: Request):
         data = await request.json()
         message = data.get('message')
         user_id = data.get('user_id')
+        conversation_id = data.get('conversation_id')
 
         if not message or not user_id:
             return JSONResponse(
@@ -353,7 +352,8 @@ async def chat(request: Request):
             "inputs": {},
             "query": message,
             "user": user_id,
-            "response_mode": "blocking"
+            "response_mode": "blocking",
+            "conversation_id": conversation_id or ""
         }
 
         async with aiohttp.ClientSession() as session:
@@ -366,10 +366,204 @@ async def chat(request: Request):
                     )
 
                 response_data = await response.json()
-                if 'answer' in response_data:
-                    return {"response": response_data['answer']}
-                else:
-                    return {"error": "No answer received from the chat service"}
+                return response_data
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.get("/api/conversations")
+async def get_conversations(user_id: str, last_id: Optional[str] = None, limit: Optional[int] = 20):
+    try:
+        url = f"{BASE_URL}/conversations"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'user': user_id,
+            'last_id': last_id,
+            'limit': limit
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, user_id: str):
+    try:
+        url = f"{BASE_URL}/conversations/{conversation_id}"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            'user': user_id
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/conversations/{conversation_id}/name")
+async def rename_conversation(conversation_id: str, request: Request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        name = data.get('name')
+        auto_generate = data.get('auto_generate', False)
+
+        if not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "user_id is required"}
+            )
+
+        url = f"{BASE_URL}/conversations/{conversation_id}/name"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            'user': user_id,
+            'name': name,
+            'auto_generate': auto_generate
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.post("/api/messages/{message_id}/feedbacks")
+async def message_feedback(message_id: str, request: Request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        rating = data.get('rating')
+
+        if not user_id or not rating:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "user_id and rating are required"}
+            )
+
+        url = f"{BASE_URL}/messages/{message_id}/feedbacks"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            'user': user_id,
+            'rating': rating
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.get("/api/messages/{message_id}/suggested")
+async def get_suggested_questions(message_id: str, user_id: str):
+    try:
+        url = f"{BASE_URL}/messages/{message_id}/suggested"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'user': user_id
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
+
+@app.get("/api/messages")
+async def get_conversation_messages(conversation_id: str, user_id: str, first_id: Optional[str] = None, limit: Optional[int] = 20):
+    try:
+        url = f"{BASE_URL}/messages"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'conversation_id': conversation_id,
+            'user': user_id,
+            'first_id': first_id,
+            'limit': limit
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+                return await response.json()
 
     except Exception as e:
         return JSONResponse(
