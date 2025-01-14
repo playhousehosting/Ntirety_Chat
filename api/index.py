@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import json
@@ -7,6 +7,8 @@ import os
 import uuid
 from typing import Optional, Dict, Any
 import base64
+import asyncio
+from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI()
 
@@ -20,7 +22,7 @@ app.add_middleware(
 )
 
 # Dify API configuration
-BASE_URL = os.environ.get('DIFY_BASE_URL', "https://bots.chatwithgpt.app/v1")
+BASE_URL = os.environ.get('DIFY_BASE_URL', "http://bots.chatwithgpt.app/v1")
 API_KEY = os.environ.get('DIFY_API_KEY', "app-3wTiB7TV6d1UY3qHf0GL2W5J")
 
 @app.get("/", response_class=HTMLResponse)
@@ -134,25 +136,35 @@ async def root():
                 userInput.value = '';
 
                 try {
-                    const response = await fetch('/api/chat', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            message: messageText,
-                            user_id: userId
-                        })
-                    });
+                    const eventSource = new EventSource(`/api/chat/stream?message=${encodeURIComponent(messageText)}&user_id=${userId}`);
+                    let fullResponse = '';
 
-                    const data = await response.json();
-                    if (data.error) {
-                        appendMessage('Error: ' + data.error, false);
-                    } else if (data.response) {
-                        appendMessage(data.response, false);
-                    } else {
-                        appendMessage('Received an invalid response from the server.', false);
-                    }
+                    eventSource.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.answer) {
+                                fullResponse += data.answer;
+                                // Update the last message if it's from the assistant
+                                const messages = chatContainer.getElementsByClassName('assistant-message');
+                                if (messages.length > 0) {
+                                    const lastMessage = messages[messages.length - 1];
+                                    lastMessage.textContent = fullResponse;
+                                } else {
+                                    appendMessage(fullResponse, false);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error parsing SSE data:', error);
+                        }
+                    };
+
+                    eventSource.onerror = (error) => {
+                        console.error('EventSource error:', error);
+                        eventSource.close();
+                        if (!fullResponse) {
+                            appendMessage('Sorry, there was an error processing your message.', false);
+                        }
+                    };
                 } catch (error) {
                     console.error('Error:', error);
                     appendMessage('Sorry, there was an error processing your message.', false);
@@ -240,65 +252,43 @@ async def root():
     </html>
     """
 
-@app.post("/api/chat")
-async def chat(request: Request):
-    try:
+@app.get("/api/chat/stream")
+async def chat_stream(message: str, user_id: str):
+    async def event_generator():
         try:
-            data = await request.json()
-        except json.JSONDecodeError:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Invalid JSON data"}
-            )
+            url = f"{BASE_URL}/chat-messages"
+            headers = {
+                'Authorization': f'Bearer {API_KEY}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                "inputs": {},
+                "query": message,
+                "user": user_id,
+                "response_mode": "streaming"
+            }
 
-        message = data.get('message')
-        user_id = data.get('user_id')
+            async with requests.post(url, headers=headers, json=payload, stream=True) as response:
+                response.raise_for_status()
+                async for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line.decode())
+                            yield {
+                                "event": "message",
+                                "data": json.dumps(data)
+                            }
+                        except json.JSONDecodeError:
+                            continue
 
-        if not message or not user_id:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Message and user_id are required"}
-            )
+        except Exception as e:
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(e)})
+            }
 
-        # Call Dify API
-        url = f"{BASE_URL}/chat-messages"
-        headers = {
-            'Authorization': f'Bearer {API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        
-        payload = {
-            "inputs": {},
-            "query": message,
-            "user": user_id,
-            "response_mode": "blocking"
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()  # Raise an exception for bad status codes
-            response_data = response.json()
-        except requests.RequestException as e:
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Failed to communicate with chat service: {str(e)}"}
-            )
-        except json.JSONDecodeError:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Received invalid response from chat service"}
-            )
-
-        if 'answer' in response_data:
-            return {"response": response_data['answer']}
-        else:
-            return {"error": "No answer received from the chat service"}
-
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"An error occurred: {str(e)}"}
-        )
+    return EventSourceResponse(event_generator())
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), user_id: str = None):
