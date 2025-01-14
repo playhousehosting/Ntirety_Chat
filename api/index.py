@@ -1,13 +1,13 @@
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import requests
 import json
 import os
 import uuid
 from typing import Optional, Dict, Any
 import base64
 import asyncio
+import aiohttp
 from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI()
@@ -266,29 +266,92 @@ async def chat_stream(message: str, user_id: str):
                 "inputs": {},
                 "query": message,
                 "user": user_id,
-                "response_mode": "streaming"
+                "response_mode": "streaming",
+                "conversation_id": ""
             }
 
-            async with requests.post(url, headers=headers, json=payload, stream=True) as response:
-                response.raise_for_status()
-                async for line in response.iter_lines():
-                    if line:
-                        try:
-                            data = json.loads(line.decode())
-                            yield {
-                                "event": "message",
-                                "data": json.dumps(data)
-                            }
-                        except json.JSONDecodeError:
-                            continue
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        yield {
+                            "event": "error",
+                            "data": json.dumps({"error": f"API Error: {error_text}"})
+                        }
+                        return
+
+                    async for line in response.content:
+                        if line:
+                            try:
+                                line_text = line.decode('utf-8').strip()
+                                if line_text:
+                                    data = json.loads(line_text)
+                                    yield {
+                                        "event": "message",
+                                        "data": json.dumps(data)
+                                    }
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                yield {
+                                    "event": "error",
+                                    "data": json.dumps({"error": f"Processing error: {str(e)}"})
+                                }
 
         except Exception as e:
             yield {
                 "event": "error",
-                "data": json.dumps({"error": str(e)})
+                "data": json.dumps({"error": f"Connection error: {str(e)}"})
             }
 
     return EventSourceResponse(event_generator())
+
+@app.post("/api/chat")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        message = data.get('message')
+        user_id = data.get('user_id')
+
+        if not message or not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Message and user_id are required"}
+            )
+
+        url = f"{BASE_URL}/chat-messages"
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            "inputs": {},
+            "query": message,
+            "user": user_id,
+            "response_mode": "blocking"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"API Error: {error_text}"}
+                    )
+
+                response_data = await response.json()
+                if 'answer' in response_data:
+                    return {"response": response_data['answer']}
+                else:
+                    return {"error": "No answer received from the chat service"}
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"An error occurred: {str(e)}"}
+        )
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), user_id: str = None):
@@ -299,7 +362,6 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
         )
 
     try:
-        # Validate file type
         allowed_types = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
         content_type = file.content_type or 'application/octet-stream'
         
@@ -309,45 +371,34 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
                 content={"error": f"File type {content_type} not supported. Allowed types: PNG, JPEG, GIF, WEBP"}
             )
 
-        # Read file content
-        try:
-            contents = await file.read()
-        except Exception as e:
-            return JSONResponse(
-                status_code=400,
-                content={"error": f"Failed to read file: {str(e)}"}
-            )
+        contents = await file.read()
         
-        # Call Dify API for file upload
         url = f"{BASE_URL}/files/upload"
         headers = {
             'Authorization': f'Bearer {API_KEY}'
         }
         
-        files = {
-            'file': (file.filename, contents, content_type)
-        }
-        data = {
-            'user': user_id
-        }
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field('file', contents, filename=file.filename, content_type=content_type)
+            form.add_field('user', user_id)
 
-        try:
-            response = requests.post(url, headers=headers, files=files, data=data)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Failed to upload file to chat service: {str(e)}"}
-            )
+            async with session.post(url, headers=headers, data=form) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"Failed to upload file: {error_text}"}
+                    )
 
-        try:
-            response_data = response.json()
-            return {"response": "File uploaded successfully", "data": response_data}
-        except json.JSONDecodeError:
-            if response.status_code == 200:
-                return {"response": "File uploaded successfully"}
-            else:
-                return {"error": "Failed to parse response from chat service"}
+                try:
+                    response_data = await response.json()
+                    return {"response": "File uploaded successfully", "data": response_data}
+                except json.JSONDecodeError:
+                    if response.status == 200:
+                        return {"response": "File uploaded successfully"}
+                    else:
+                        return {"error": "Failed to parse response from chat service"}
 
     except Exception as e:
         return JSONResponse(
